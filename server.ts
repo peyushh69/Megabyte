@@ -61,6 +61,11 @@ async function closeFileHandleSafely(fileId: string) {
   if (handle) {
     openFileHandles.delete(fileId);
     try {
+      await handle.datasync();
+    } catch {
+      // ignore
+    }
+    try {
       await handle.close();
     } catch {
       // ignore already closed

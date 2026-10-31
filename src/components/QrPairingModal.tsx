@@ -33,7 +33,7 @@ export const QrPairingModal: React.FC<QrPairingModalProps> = ({
       aria-labelledby="qr-modal-title"
     >
       <div className="w-full max-w-sm bg-[#EAE8E3] border-2 border-[#111111] overflow-hidden">
-        <div className="flex items-center justify-between px-5 py-3 bg-[#FF6A1A] border-b-2 border-[#111111]">
+        <div className="flex items-center justify-between px-5 py-3 bg-[#FF3B00] border-b-2 border-[#111111]">
           <h3 id="qr-modal-title" className="text-sm font-bold tracking-widest text-[#111111]">
             SCAN TO OPEN ROOM
           </h3>
@@ -58,7 +58,7 @@ export const QrPairingModal: React.FC<QrPairingModalProps> = ({
           <button
             type="button"
             onClick={handleCopy}
-            className="w-full inline-flex items-center justify-center gap-2 px-4 py-2.5 text-xs font-bold tracking-widest text-[#111111] bg-[#FF6A1A] border border-[#111111] hover:bg-[#111111] hover:text-[#EAE8E3] transition-colors cursor-pointer"
+            className="w-full inline-flex items-center justify-center gap-2 px-4 py-2.5 text-xs font-bold tracking-widest text-[#111111] bg-[#FF3B00] border border-[#111111] hover:bg-[#111111] hover:text-[#EAE8E3] transition-colors cursor-pointer"
           >
             {copied ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
             {copied ? 'LINK COPIED' : 'COPY ROOM LINK'}

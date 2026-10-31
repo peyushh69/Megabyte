@@ -195,7 +195,7 @@ interface IncomingDownloadState {
   fileId: string;
   totalBytes: number;
   receivedBytes: number;
-  chunks: ArrayBuffer[];
+  chunks: Uint8Array[];
   startTime: number;
   onProgress: (pct: number, mbps: number) => void;
   resolve: (blob: Blob) => void;
@@ -456,16 +456,33 @@ export class P2PRoomSession {
       this.streamFileToPeer(conn, fileId);
     } else if (msg.type === 'p2p:file-chunk') {
       const fileId = String(msg.fileId || '');
+      const chunkIndex = Number(msg.index ?? -1);
       const dl = this.activeDownloads.get(fileId);
       if (!dl) return;
 
-      const chunkData = msg.chunk as ArrayBuffer;
-      if (chunkData) {
-        dl.chunks.push(chunkData);
-        dl.receivedBytes += chunkData.byteLength;
+      const rawChunk = msg.chunk;
+      let bytesView: Uint8Array | null = null;
+      if (rawChunk instanceof ArrayBuffer) {
+        bytesView = new Uint8Array(rawChunk);
+      } else if (ArrayBuffer.isView(rawChunk)) {
+        bytesView = new Uint8Array(
+          rawChunk.buffer.slice(rawChunk.byteOffset, rawChunk.byteOffset + rawChunk.byteLength)
+        );
+      }
+
+      if (bytesView) {
+        if (chunkIndex >= 0) {
+          dl.chunks[chunkIndex] = bytesView;
+        } else {
+          dl.chunks.push(bytesView);
+        }
+        dl.receivedBytes += bytesView.byteLength;
         const elapsedSec = Math.max(0.015, (performance.now() - dl.startTime) / 1000);
         const mbps = Math.max(1.0, (dl.receivedBytes * 8) / 1_000_000 / elapsedSec);
-        const pct = dl.totalBytes > 0 ? Math.min(100, Math.round((dl.receivedBytes / dl.totalBytes) * 100)) : 100;
+        const pct =
+          dl.totalBytes > 0
+            ? Math.min(100, Math.round((dl.receivedBytes / dl.totalBytes) * 100))
+            : 100;
         dl.onProgress(pct, Number(mbps.toFixed(1)));
       }
     } else if (msg.type === 'p2p:file-complete') {
@@ -474,7 +491,10 @@ export class P2PRoomSession {
       if (!dl) return;
       this.activeDownloads.delete(fileId);
       const meta = this.filesMap.get(fileId);
-      const blob = new Blob(dl.chunks, { type: meta?.mimeType || 'application/octet-stream' });
+      const orderedParts = dl.chunks.filter(Boolean) as BlobPart[];
+      const blob = new Blob(orderedParts, {
+        type: meta?.mimeType || 'application/octet-stream',
+      });
       this.memoryBlobs.set(fileId, blob);
       if (meta) {
         saveFileToLocalVault(this.roomId, meta, blob);
@@ -491,12 +511,14 @@ export class P2PRoomSession {
     if (!blob) return;
 
     let offset = 0;
+    let index = 0;
     while (offset < blob.size) {
       const end = Math.min(blob.size, offset + P2P_CHUNK_SIZE);
       const buffer = await blob.slice(offset, end).arrayBuffer();
       conn.send({
         type: 'p2p:file-chunk',
         fileId,
+        index: index++,
         chunk: buffer,
       });
       offset = end;

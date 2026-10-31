@@ -1033,7 +1033,7 @@ export default function App() {
           <button
             type="button"
             onClick={() => setIsQrModalOpen(true)}
-            className="inline-flex items-center gap-1.5 px-3 py-1 text-xs font-bold tracking-wider text-[#111111] bg-[#FF6A1A] border border-[#111111] hover:bg-[#111111] hover:text-[#EAE8E3] transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+            className="inline-flex items-center gap-1.5 px-3 py-1 text-xs font-bold tracking-wider text-[#111111] bg-[#FF3B00] border border-[#111111] hover:bg-[#111111] hover:text-[#EAE8E3] transition-colors whitespace-nowrap shrink-0 cursor-pointer"
           >
             <QrCode className="w-3.5 h-3.5" />
             QR CODE
@@ -1049,7 +1049,7 @@ export default function App() {
             <button
               type="button"
               onClick={() => setNotificationBanner(null)}
-              className="text-[#FF6A1A] hover:underline whitespace-nowrap shrink-0 cursor-pointer"
+              className="text-[#FF3B00] hover:underline whitespace-nowrap shrink-0 cursor-pointer"
             >
               CLOSE
             </button>
@@ -1148,7 +1148,7 @@ export default function App() {
               />
               <button
                 type="submit"
-                className="px-4 py-2 text-xs font-bold text-[#EAE8E3] bg-[#111111] border border-[#111111] hover:bg-[#FF6A1A] hover:text-[#111111] transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                className="px-4 py-2 text-xs font-bold text-[#EAE8E3] bg-[#111111] border border-[#111111] hover:bg-[#FF3B00] hover:text-[#111111] transition-colors whitespace-nowrap shrink-0 cursor-pointer"
               >
                 JOIN ROOM
               </button>
@@ -1157,7 +1157,7 @@ export default function App() {
         </section>
 
         {requiresPinUnlock ? (
-          <section className="bg-[#FF6A1A] border border-[#111111] p-8 max-w-md mx-auto text-center space-y-4">
+          <section className="bg-[#FF3B00] border border-[#111111] p-8 max-w-md mx-auto text-center space-y-4">
             <Lock className="w-6 h-6 mx-auto text-[#111111]" />
             <h2 className="text-base font-bold tracking-widest text-[#111111]">
               ENTER PIN FOR ROOM {roomId}
@@ -1183,8 +1183,8 @@ export default function App() {
           </section>
         ) : (
           <>
-            {/* Orange Transfer Box (#FF6A1A) — Single Upload Area, Single Channel Switch, Single Auto-Delete */}
-            <section id="transfer" className="bg-[#FF6A1A] text-[#111111] border border-[#111111]">
+            {/* Orange Transfer Box (#FF3B00) — Single Upload Area, Single Channel Switch, Single Auto-Delete */}
+            <section id="transfer" className="bg-[#FF3B00] text-[#111111] border border-[#111111]">
               {/* Top Settings Bar inside Orange Block */}
               <div className="px-5 py-3 border-b border-[#111111] flex flex-wrap items-center justify-between gap-4">
                 {/* Channel Selector (Appears Once) */}
@@ -1297,7 +1297,7 @@ export default function App() {
                   className={`border-2 border-[#111111] p-8 sm:p-10 transition-colors cursor-pointer flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 ${
                     isDragging
                       ? 'bg-[#EAE8E3] text-[#111111]'
-                      : 'bg-[#FF6A1A] hover:bg-[#EAE8E3]/25'
+                      : 'bg-[#FF3B00] hover:bg-[#EAE8E3]/25'
                   }`}
                 >
                   <div className="space-y-1">
@@ -1323,7 +1323,7 @@ export default function App() {
                         UPLOADING &gt; {activeUploadName}
                       </span>
                       <div className="flex items-center gap-2 shrink-0">
-                        <span className="text-[#FF6A1A] font-bold">
+                        <span className="text-[#FF3B00] font-bold">
                           {activeUploadMbps.toFixed(1)} Mbps
                         </span>
                         <span>&gt;</span>
@@ -1332,7 +1332,7 @@ export default function App() {
                           type="button"
                           onClick={handleCancelActiveUpload}
                           title="Cancel transfer"
-                          className="p-0.5 text-[#EAE8E3] hover:text-[#FF6A1A] cursor-pointer"
+                          className="p-0.5 text-[#EAE8E3] hover:text-[#FF3B00] cursor-pointer"
                         >
                           <X className="w-3.5 h-3.5" />
                         </button>
@@ -1340,7 +1340,7 @@ export default function App() {
                     </div>
                     <div className="w-full h-2 bg-[#EAE8E3]/20 overflow-hidden">
                       <div
-                        className="h-full bg-[#FF6A1A] transition-transform duration-75 origin-left"
+                        className="h-full bg-[#FF3B00] transition-transform duration-75 origin-left"
                         style={{
                           transform: `scaleX(${activeUploadProgress / 100})`,
                         }}
@@ -1357,7 +1357,7 @@ export default function App() {
                         DOWNLOADING &gt; {activeDownloadName}
                       </span>
                       <div className="flex items-center gap-2 shrink-0">
-                        <span className="text-[#FF6A1A] font-bold">
+                        <span className="text-[#FF3B00] font-bold">
                           {activeDownloadMbps.toFixed(1)} Mbps
                         </span>
                         <span>&gt;</span>
@@ -1366,7 +1366,7 @@ export default function App() {
                     </div>
                     <div className="w-full h-2 bg-[#EAE8E3]/20 overflow-hidden">
                       <div
-                        className="h-full bg-[#FF6A1A] transition-transform duration-75 origin-left"
+                        className="h-full bg-[#FF3B00] transition-transform duration-75 origin-left"
                         style={{
                           transform: `scaleX(${activeDownloadProgress / 100})`,
                         }}
@@ -1376,7 +1376,7 @@ export default function App() {
                 )}
 
                 {uploadError && (
-                  <div className="bg-[#111111] text-[#FF6A1A] px-4 py-2.5 text-xs font-bold tracking-wider">
+                  <div className="bg-[#111111] text-[#FF3B00] px-4 py-2.5 text-xs font-bold tracking-wider">
                     {uploadError}
                   </div>
                 )}
@@ -1394,7 +1394,7 @@ export default function App() {
                   <button
                     type="button"
                     onClick={handleClearRoom}
-                    className="px-3 py-1 text-xs font-bold tracking-wider text-[#111111] bg-[#FF6A1A] border border-[#111111] hover:bg-[#111111] hover:text-[#EAE8E3] transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                    className="px-3 py-1 text-xs font-bold tracking-wider text-[#111111] bg-[#FF3B00] border border-[#111111] hover:bg-[#111111] hover:text-[#EAE8E3] transition-colors whitespace-nowrap shrink-0 cursor-pointer"
                   >
                     DELETE ALL
                   </button>
@@ -1444,7 +1444,7 @@ export default function App() {
                           </div>
                         </div>
 
-                        <div className="lg:col-span-4 bg-[#FF6A1A] text-[#111111] px-4 py-2 flex items-center justify-between gap-3 border border-[#111111]">
+                        <div className="lg:col-span-4 bg-[#FF3B00] text-[#111111] px-4 py-2 flex items-center justify-between gap-3 border border-[#111111]">
                           <span className="text-sm font-bold font-mono tracking-wider whitespace-nowrap">
                             {formatBytes(file.size)}
                           </span>
@@ -1502,7 +1502,7 @@ export default function App() {
                         </span>
                       </div>
 
-                      <span className="px-2.5 py-0.5 text-xs font-bold bg-[#FF6A1A] text-[#111111] border border-[#111111]">
+                      <span className="px-2.5 py-0.5 text-xs font-bold bg-[#FF3B00] text-[#111111] border border-[#111111]">
                         ONLINE
                       </span>
                     </div>
