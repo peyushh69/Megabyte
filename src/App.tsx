@@ -16,9 +16,39 @@ import {
 } from 'lucide-react';
 import { SharedFileItem, ConnectedDevice, TransferMode } from './types';
 import { QrPairingModal } from './components/QrPairingModal';
+import { P2PRoomSession } from './services/p2pRoomEngine';
 
 const MAX_CAPACITY_BYTES = 10 * 1024 * 1024 * 1024; // 10 GB
 const PARALLEL_STREAMS = 6;
+const CLOUD_RELAY_ORIGIN = 'https://ais-pre-hfc6oo7zpwljrbblduvnkw-567788766771.asia-southeast1.run.app';
+
+async function resolveActiveBackendOrigin(): Promise<string | null> {
+  // 1. Check same-origin first (works on Cloud Run / Node server)
+  try {
+    const res = await fetch('/api/health', { method: 'GET' });
+    const ct = res.headers.get('content-type') || '';
+    if (res.ok && ct.includes('application/json')) {
+      return '';
+    }
+  } catch {
+    // ignore
+  }
+
+  // 2. When deployed to Vercel static hosting, check Cloud Relay Origin
+  if (typeof window !== 'undefined' && window.location.origin !== CLOUD_RELAY_ORIGIN) {
+    try {
+      const res = await fetch(`${CLOUD_RELAY_ORIGIN}/api/health`, { method: 'GET', mode: 'cors' });
+      const ct = res.headers.get('content-type') || '';
+      if (res.ok && ct.includes('application/json')) {
+        return CLOUD_RELAY_ORIGIN;
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  return null;
+}
 
 function getOptimalChunkSize(fileSize: number): number {
   if (fileSize <= 8 * 1024 * 1024) return 512 * 1024;
@@ -130,10 +160,22 @@ export default function App() {
 
   const [retentionHours, setRetentionHours] = useState<number>(24);
 
-  const [files, setFiles] = useState<SharedFileItem[]>([]);
-  const [devices, setDevices] = useState<ConnectedDevice[]>([]);
-  const [usedBytes, setUsedBytes] = useState<number>(0);
-  const [isLoadingRoom, setIsLoadingRoom] = useState<boolean>(true);
+  const [serverFiles, setServerFiles] = useState<SharedFileItem[]>([]);
+  const [p2pFiles, setP2pFiles] = useState<SharedFileItem[]>([]);
+
+  const selfDeviceRecord: ConnectedDevice = {
+    id: deviceInfo.deviceId,
+    name: deviceInfo.deviceName,
+    deviceType: deviceInfo.deviceType,
+    platform: deviceInfo.platform,
+    transport: 'Wi-Fi / High-Speed Relay',
+    status: 'online',
+    lastSeen: new Date().toISOString(),
+  };
+
+  const [serverDevices, setServerDevices] = useState<ConnectedDevice[]>([]);
+  const [p2pDevices, setP2pDevices] = useState<ConnectedDevice[]>([selfDeviceRecord]);
+  const [isLoadingRoom, setIsLoadingRoom] = useState<boolean>(false);
 
   const [transferMode, setTransferMode] = useState<TransferMode>('Wi-Fi Direct');
   const [bluetoothDeviceName, setBluetoothDeviceName] = useState<string | null>(null);
@@ -157,29 +199,88 @@ export default function App() {
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
+  const p2pSessionRef = useRef<P2PRoomSession | null>(null);
+  const backendOriginRef = useRef<string | null>(null);
   const activeXhrsRef = useRef<Set<XMLHttpRequest>>(new Set());
   const uploadCancelledRef = useRef<boolean>(false);
 
-  // High-Speed 6x Parallel Range Downloader
+  // Merge server + P2P files (deduplicated by name + size or id)
+  const files: SharedFileItem[] = React.useMemo(() => {
+    const map = new Map<string, SharedFileItem>();
+    for (const f of p2pFiles) {
+      map.set(`${f.name}:${f.size}`, f);
+    }
+    for (const f of serverFiles) {
+      map.set(`${f.name}:${f.size}`, f);
+    }
+    return Array.from(map.values()).sort(
+      (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+    );
+  }, [serverFiles, p2pFiles]);
+
+  // Merge server + P2P devices (always includes selfDeviceRecord)
+  const devices: ConnectedDevice[] = React.useMemo(() => {
+    const map = new Map<string, ConnectedDevice>();
+    map.set(selfDeviceRecord.id, selfDeviceRecord);
+    for (const d of p2pDevices) {
+      map.set(d.id, d);
+    }
+    for (const d of serverDevices) {
+      map.set(d.id, d);
+    }
+    return Array.from(map.values());
+  }, [serverDevices, p2pDevices, selfDeviceRecord.id]);
+
+  const usedBytes = React.useMemo(
+    () => files.reduce((acc, f) => acc + (f.size || 0), 0),
+    [files]
+  );
+
+  // High-Speed Hybrid Downloader (P2P / Local Vault + 6x Parallel Range Server Stream)
   const triggerDownload = useCallback(
     async (file: SharedFileItem) => {
-      const downloadUrl = `/api/rooms/${encodeURIComponent(file.roomId)}/files/${encodeURIComponent(file.id)}/download?pin=${encodeURIComponent(roomPin)}`;
-
-      if (file.size > 250 * 1024 * 1024 || file.size === 0) {
-        const link = document.createElement('a');
-        link.href = downloadUrl;
-        link.download = file.name;
-        document.body.appendChild(link);
-        link.click();
-        document.body.removeChild(link);
-        return;
-      }
-
       try {
         setActiveDownloadName(file.name);
         setActiveDownloadProgress(0);
-        const startTime = performance.now();
+        setActiveDownloadMbps(25.0);
 
+        // 1. Check P2P Session (Local IndexedDB Vault or Connected WebRTC Peer)
+        if (p2pSessionRef.current) {
+          const p2pBlob = await p2pSessionRef.current
+            .downloadFileBlob(file, (pct, mbps) => {
+              setActiveDownloadProgress(pct);
+              setActiveDownloadMbps(mbps);
+            })
+            .catch(() => null);
+
+          if (p2pBlob) {
+            const objectUrl = URL.createObjectURL(p2pBlob);
+            const link = document.createElement('a');
+            link.href = objectUrl;
+            link.download = file.name;
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+            setTimeout(() => URL.revokeObjectURL(objectUrl), 10000);
+            return;
+          }
+        }
+
+        // 2. Fallback to Backend Server Download
+        const base = backendOriginRef.current ?? '';
+        const downloadUrl = `${base}/api/rooms/${encodeURIComponent(file.roomId)}/files/${encodeURIComponent(file.id)}/download?pin=${encodeURIComponent(roomPin)}`;
+
+        if (file.size > 250 * 1024 * 1024 || file.size === 0) {
+          const link = document.createElement('a');
+          link.href = downloadUrl;
+          link.download = file.name;
+          document.body.appendChild(link);
+          link.click();
+          document.body.removeChild(link);
+          return;
+        }
+
+        const startTime = performance.now();
         const chunkSize = getOptimalChunkSize(file.size);
         const ranges: { index: number; start: number; end: number }[] = [];
         let cursor = 0;
@@ -255,6 +356,8 @@ export default function App() {
         document.body.removeChild(link);
         setTimeout(() => URL.revokeObjectURL(objectUrl), 10000);
       } catch {
+        const base = backendOriginRef.current ?? '';
+        const downloadUrl = `${base}/api/rooms/${encodeURIComponent(file.roomId)}/files/${encodeURIComponent(file.id)}/download?pin=${encodeURIComponent(roomPin)}`;
         const link = document.createElement('a');
         link.href = downloadUrl;
         link.download = file.name;
@@ -269,147 +372,195 @@ export default function App() {
     [roomPin]
   );
 
-  const fetchRoomState = useCallback(
-    async (targetRoom: string, currentPin: string) => {
-      try {
-        setIsLoadingRoom(true);
-        const res = await fetch(`/api/rooms/${encodeURIComponent(targetRoom)}`, {
-          headers: {
-            'X-Room-Pin': currentPin,
-          },
-        });
-        if (res.status === 403) {
-          setRequiresPinUnlock(true);
-          setFiles([]);
-          setDevices([]);
-          return;
-        }
-        if (!res.ok) return;
-        const data = await res.json();
-        setRequiresPinUnlock(false);
-        setPinUnlockError(null);
-        setHasRoomPin(Boolean(data.hasPin));
-        if (typeof data.retentionHours === 'number') {
-          setRetentionHours(data.retentionHours);
-        }
-        setFiles(data.files || []);
-        setUsedBytes(data.usedBytes || 0);
-        setDevices(data.devices || []);
-      } catch (err) {
-        console.error('Failed to fetch room:', err);
-      } finally {
-        setIsLoadingRoom(false);
-      }
-    },
-    []
-  );
-
+  // Start P2P WebRTC + IndexedDB Session (Works on Vercel & Static Hosts without a backend)
   useEffect(() => {
-    fetchRoomState(roomId, roomPin);
+    const p2p = new P2PRoomSession(
+      roomId,
+      {
+        id: deviceInfo.deviceId,
+        name: deviceInfo.deviceName,
+        deviceType: deviceInfo.deviceType,
+        platform: deviceInfo.platform,
+        transport:
+          transferMode === 'Bluetooth Beam'
+            ? 'Bluetooth Paired'
+            : 'Wi-Fi / High-Speed Relay',
+        status: 'online',
+        lastSeen: new Date().toISOString(),
+      },
+      {
+        onFilesUpdated: (list) => setP2pFiles(list),
+        onDevicesUpdated: (list) => setP2pDevices(list),
+        onRetentionUpdated: (hours) => setRetentionHours(hours),
+        onPinStateUpdated: (has) => setHasRoomPin(has),
+        onFileReceivedBanner: (name) =>
+          setNotificationBanner(`NEW FILE RECEIVED > ${name}`),
+      }
+    );
 
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${protocol}//${window.location.host}/ws`;
+    p2pSessionRef.current = p2p;
+    p2p.start();
+
+    return () => {
+      p2p.stop();
+      if (p2pSessionRef.current === p2p) {
+        p2pSessionRef.current = null;
+      }
+    };
+  }, [roomId, deviceInfo, transferMode]);
+
+  // Connect to Express Backend + WebSocket when available (Same-Origin or Cloud Relay)
+  useEffect(() => {
+    let cancelled = false;
     let socket: WebSocket | null = null;
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
-    const connectWs = () => {
-      socket = new WebSocket(wsUrl);
-      wsRef.current = socket;
+    const initBackendConnection = async () => {
+      const origin = await resolveActiveBackendOrigin();
+      if (cancelled) return;
+      backendOriginRef.current = origin;
 
-      socket.onopen = () => {
-        socket?.send(
-          JSON.stringify({
-            type: 'room:join',
-            roomId,
-            pin: roomPin,
-            deviceId: deviceInfo.deviceId,
-            deviceName: deviceInfo.deviceName,
-            deviceType: deviceInfo.deviceType,
-            platform: deviceInfo.platform,
-            transport:
-              transferMode === 'Bluetooth Beam'
-                ? 'Bluetooth Paired'
-                : 'Wi-Fi / High-Speed Relay',
-          })
-        );
-      };
+      if (origin === null) {
+        // Running on static Vercel without reachable backend; P2PRoomSession handles everything
+        setIsLoadingRoom(false);
+        return;
+      }
 
-      socket.onmessage = (event) => {
-        try {
-          const msg = JSON.parse(event.data);
-          if (msg.type === 'room:auth-required') {
-            setRequiresPinUnlock(true);
-            setIsLoadingRoom(false);
-          } else if (msg.type === 'room:init') {
-            setRequiresPinUnlock(false);
-            setHasRoomPin(Boolean(msg.hasPin));
-            if (typeof msg.retentionHours === 'number') {
-              setRetentionHours(msg.retentionHours);
-            }
-            setFiles(msg.files || []);
-            setUsedBytes(msg.usedBytes || 0);
-            setDevices(msg.devices || []);
-            setIsLoadingRoom(false);
-          } else if (msg.type === 'room:pin-updated') {
-            setHasRoomPin(Boolean(msg.hasPin));
-          } else if (msg.type === 'room:retention-updated') {
-            if (typeof msg.retentionHours === 'number') {
-              setRetentionHours(msg.retentionHours);
-            }
-            if (Array.isArray(msg.files)) {
-              setFiles(msg.files);
-            }
-          } else if (msg.type === 'devices:updated') {
-            setDevices(msg.devices || []);
-          } else if (msg.type === 'file:created') {
-            setFiles((prev) => {
-              if (prev.some((f) => f.id === msg.file.id)) return prev;
-              return [msg.file, ...prev];
-            });
-            setUsedBytes(msg.usedBytes ?? 0);
-          } else if (msg.type === 'file:progress') {
-            setFiles((prev) =>
-              prev.map((f) => (f.id === msg.file.id ? msg.file : f))
-            );
-            setUsedBytes(msg.usedBytes ?? 0);
-          } else if (msg.type === 'file:completed') {
-            setFiles((prev) => {
-              const exists = prev.some((f) => f.id === msg.file.id);
-              if (!exists) return [msg.file, ...prev];
-              return prev.map((f) => (f.id === msg.file.id ? msg.file : f));
-            });
-            setUsedBytes(msg.usedBytes ?? 0);
-
-            if (msg.file.senderDeviceName !== deviceInfo.deviceName) {
-              setNotificationBanner(`NEW FILE RECEIVED > ${msg.file.name}`);
-            }
-          } else if (msg.type === 'file:deleted') {
-            setFiles((prev) => prev.filter((f) => f.id !== msg.fileId));
-            setUsedBytes(msg.usedBytes ?? 0);
-          } else if (msg.type === 'room:cleared') {
-            setFiles([]);
-            setUsedBytes(0);
+      try {
+        const res = await fetch(`${origin}/api/rooms/${encodeURIComponent(roomId)}`, {
+          headers: { 'X-Room-Pin': roomPin },
+        });
+        if (res.status === 403) {
+          setRequiresPinUnlock(true);
+          setServerFiles([]);
+          setServerDevices([]);
+          return;
+        }
+        const ct = res.headers.get('content-type') || '';
+        if (res.ok && ct.includes('application/json')) {
+          const data = await res.json();
+          setRequiresPinUnlock(false);
+          setPinUnlockError(null);
+          setHasRoomPin(Boolean(data.hasPin));
+          if (typeof data.retentionHours === 'number') {
+            setRetentionHours(data.retentionHours);
           }
-        } catch (e) {
-          console.error('WS parse error:', e);
+          setServerFiles(data.files || []);
+          setServerDevices(data.devices || []);
+        }
+      } catch {
+        // P2P engine handles offline/static state
+      } finally {
+        setIsLoadingRoom(false);
+      }
+
+      const wsUrl = origin
+        ? `${origin.replace(/^http/, 'ws')}/ws`
+        : `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/ws`;
+
+      const connectWs = () => {
+        if (cancelled) return;
+        try {
+          socket = new WebSocket(wsUrl);
+          wsRef.current = socket;
+
+          socket.onopen = () => {
+            socket?.send(
+              JSON.stringify({
+                type: 'room:join',
+                roomId,
+                pin: roomPin,
+                deviceId: deviceInfo.deviceId,
+                deviceName: deviceInfo.deviceName,
+                deviceType: deviceInfo.deviceType,
+                platform: deviceInfo.platform,
+                transport:
+                  transferMode === 'Bluetooth Beam'
+                    ? 'Bluetooth Paired'
+                    : 'Wi-Fi / High-Speed Relay',
+              })
+            );
+          };
+
+          socket.onmessage = (event) => {
+            try {
+              const msg = JSON.parse(event.data);
+              if (msg.type === 'room:auth-required') {
+                setRequiresPinUnlock(true);
+                setIsLoadingRoom(false);
+              } else if (msg.type === 'room:init') {
+                setRequiresPinUnlock(false);
+                setHasRoomPin(Boolean(msg.hasPin));
+                if (typeof msg.retentionHours === 'number') {
+                  setRetentionHours(msg.retentionHours);
+                }
+                setServerFiles(msg.files || []);
+                setServerDevices(msg.devices || []);
+                setIsLoadingRoom(false);
+              } else if (msg.type === 'room:pin-updated') {
+                setHasRoomPin(Boolean(msg.hasPin));
+              } else if (msg.type === 'room:retention-updated') {
+                if (typeof msg.retentionHours === 'number') {
+                  setRetentionHours(msg.retentionHours);
+                }
+                if (Array.isArray(msg.files)) {
+                  setServerFiles(msg.files);
+                }
+              } else if (msg.type === 'devices:updated') {
+                setServerDevices(msg.devices || []);
+              } else if (msg.type === 'file:created') {
+                setServerFiles((prev) => {
+                  if (prev.some((f) => f.id === msg.file.id)) return prev;
+                  return [msg.file, ...prev];
+                });
+              } else if (msg.type === 'file:progress') {
+                setServerFiles((prev) =>
+                  prev.map((f) => (f.id === msg.file.id ? msg.file : f))
+                );
+              } else if (msg.type === 'file:completed') {
+                setServerFiles((prev) => {
+                  const exists = prev.some((f) => f.id === msg.file.id);
+                  if (!exists) return [msg.file, ...prev];
+                  return prev.map((f) => (f.id === msg.file.id ? msg.file : f));
+                });
+
+                if (msg.file.senderDeviceName !== deviceInfo.deviceName) {
+                  setNotificationBanner(`NEW FILE RECEIVED > ${msg.file.name}`);
+                }
+              } else if (msg.type === 'file:deleted') {
+                setServerFiles((prev) => prev.filter((f) => f.id !== msg.fileId));
+              } else if (msg.type === 'room:cleared') {
+                setServerFiles([]);
+              }
+            } catch {
+              // ignore parse error
+            }
+          };
+
+          socket.onclose = () => {
+            if (!cancelled) {
+              reconnectTimer = setTimeout(connectWs, 3500);
+            }
+          };
+        } catch {
+          // ignore ws error on static host
         }
       };
 
-      socket.onclose = () => {
-        reconnectTimer = setTimeout(connectWs, 2500);
-      };
+      connectWs();
     };
 
-    connectWs();
+    initBackendConnection();
 
     return () => {
+      cancelled = true;
       if (reconnectTimer) clearTimeout(reconnectTimer);
       if (socket) {
         socket.onclose = null;
         socket.close();
       }
     };
-  }, [roomId, roomPin, deviceInfo, transferMode, fetchRoomState]);
+  }, [roomId, roomPin, deviceInfo, transferMode]);
 
   useEffect(() => {
     if (!notificationBanner) return;
@@ -423,6 +574,8 @@ export default function App() {
     setRoomPin('');
     setRequiresPinUnlock(false);
     setPinUnlockError(null);
+    setServerFiles([]);
+    setP2pFiles([]);
     setRoomId(cleaned);
     sessionStorage.setItem('swiftbeam_private_room_id', cleaned);
     const url = new URL(window.location.href);
@@ -437,24 +590,29 @@ export default function App() {
 
   const handleSetOrClearPin = async (e: React.FormEvent) => {
     e.preventDefault();
-    try {
-      const res = await fetch(`/api/rooms/${encodeURIComponent(roomId)}/pin`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          currentPin: roomPin,
-          newPin: newPinInput.trim(),
-        }),
-      });
-      if (res.ok) {
-        const cleaned = newPinInput.trim();
-        setRoomPin(cleaned);
-        setHasRoomPin(Boolean(cleaned));
-        setIsSettingPin(false);
-        setNewPinInput('');
+    const cleaned = newPinInput.trim();
+    if (p2pSessionRef.current) {
+      await p2pSessionRef.current.updatePin(cleaned);
+    }
+    setRoomPin(cleaned);
+    setHasRoomPin(Boolean(cleaned));
+    setIsSettingPin(false);
+    setNewPinInput('');
+
+    const origin = backendOriginRef.current;
+    if (origin !== null) {
+      try {
+        await fetch(`${origin}/api/rooms/${encodeURIComponent(roomId)}/pin`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            currentPin: roomPin,
+            newPin: cleaned,
+          }),
+        });
+      } catch {
+        // handled by P2P vault
       }
-    } catch (err) {
-      console.error('Set PIN error:', err);
     }
   };
 
@@ -463,43 +621,56 @@ export default function App() {
     const candidate = pinUnlockInput.trim();
     if (!candidate) return;
 
-    const res = await fetch(`/api/rooms/${encodeURIComponent(roomId)}`, {
-      headers: { 'X-Room-Pin': candidate },
-    });
-    if (res.status === 403) {
-      setPinUnlockError('INCORRECT PIN');
-      return;
-    }
-    if (res.ok) {
+    const origin = backendOriginRef.current ?? '';
+    try {
+      const res = await fetch(`${origin}/api/rooms/${encodeURIComponent(roomId)}`, {
+        headers: { 'X-Room-Pin': candidate },
+      });
+      if (res.status === 403) {
+        setPinUnlockError('INCORRECT PIN');
+        return;
+      }
+      if (res.ok) {
+        setRoomPin(candidate);
+        setPinUnlockInput('');
+        setPinUnlockError(null);
+        setRequiresPinUnlock(false);
+      }
+    } catch {
       setRoomPin(candidate);
-      setPinUnlockInput('');
-      setPinUnlockError(null);
       setRequiresPinUnlock(false);
     }
   };
 
   const handleRoomRetentionChange = async (newHours: number) => {
     setRetentionHours(newHours);
-    try {
-      const res = await fetch(`/api/rooms/${encodeURIComponent(roomId)}/retention`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Room-Pin': roomPin,
-        },
-        body: JSON.stringify({
-          retentionHours: newHours,
-          applyToExistingFiles: true,
-        }),
-      });
-      if (res.ok) {
-        const data = await res.json();
-        if (Array.isArray(data.files)) {
-          setFiles(data.files);
+    if (p2pSessionRef.current) {
+      await p2pSessionRef.current.updateRetention(newHours);
+    }
+
+    const origin = backendOriginRef.current;
+    if (origin !== null) {
+      try {
+        const res = await fetch(`${origin}/api/rooms/${encodeURIComponent(roomId)}/retention`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Room-Pin': roomPin,
+          },
+          body: JSON.stringify({
+            retentionHours: newHours,
+            applyToExistingFiles: true,
+          }),
+        });
+        if (res.ok) {
+          const data = await res.json();
+          if (Array.isArray(data.files)) {
+            setServerFiles(data.files);
+          }
         }
+      } catch {
+        // handled by P2P vault
       }
-    } catch (err) {
-      console.error('Retention update error:', err);
     }
   };
 
@@ -555,6 +726,10 @@ export default function App() {
     setUploadError(null);
     uploadCancelledRef.current = false;
 
+    const senderLabel = bluetoothDeviceName
+      ? `${deviceInfo.deviceName} > ${bluetoothDeviceName}`
+      : deviceInfo.deviceName;
+
     for (const file of fileArray) {
       if (uploadCancelledRef.current) break;
 
@@ -565,171 +740,199 @@ export default function App() {
 
       setActiveUploadName(file.name);
       setActiveUploadProgress(0);
+      setActiveUploadMbps(28.0);
 
+      let uploadedToServer = false;
       let createdFileId: string | null = null;
+      const origin = backendOriginRef.current;
 
-      try {
-        const initRes = await fetch(`/api/rooms/${encodeURIComponent(roomId)}/files/init`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'X-Room-Pin': roomPin,
-          },
-          body: JSON.stringify({
-            name: file.name,
-            size: file.size,
-            mimeType: file.type || 'application/octet-stream',
-            senderDeviceName: bluetoothDeviceName
-              ? `${deviceInfo.deviceName} > ${bluetoothDeviceName}`
-              : deviceInfo.deviceName,
-            senderDeviceType: deviceInfo.deviceType,
+      // 1. Attempt High-Speed Server Stream if Backend Origin is Active
+      if (origin !== null) {
+        try {
+          const initRes = await fetch(`${origin}/api/rooms/${encodeURIComponent(roomId)}/files/init`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'X-Room-Pin': roomPin,
+            },
+            body: JSON.stringify({
+              name: file.name,
+              size: file.size,
+              mimeType: file.type || 'application/octet-stream',
+              senderDeviceName: senderLabel,
+              senderDeviceType: deviceInfo.deviceType,
+              transferMode,
+              retentionHours,
+            }),
+          });
+
+          const ct = initRes.headers.get('content-type') || '';
+          if (initRes.ok && ct.includes('application/json')) {
+            const { file: createdFile } = await initRes.json();
+            const fileId: string = createdFile.id;
+            createdFileId = fileId;
+
+            if (file.size === 0) {
+              await fetch(
+                `${origin}/api/rooms/${encodeURIComponent(roomId)}/files/${encodeURIComponent(fileId)}/complete`,
+                {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ speedMbps: 100 }),
+                }
+              );
+              uploadedToServer = true;
+            } else {
+              const streamStartTime = performance.now();
+              const dynamicChunkSize = getOptimalChunkSize(file.size);
+
+              const chunks: { index: number; start: number; end: number }[] = [];
+              let cursor = 0;
+              let idx = 0;
+              while (cursor < file.size) {
+                const end = Math.min(file.size, cursor + dynamicChunkSize);
+                chunks.push({ index: idx++, start: cursor, end });
+                cursor = end;
+              }
+
+              const chunkLoadedBytes = new Array<number>(chunks.length).fill(0);
+              let latestMeasuredMbps = 40.0;
+
+              const updateLiveTelemetry = () => {
+                const totalLoaded = chunkLoadedBytes.reduce((a, b) => a + b, 0);
+                const elapsedSec = Math.max(0.015, (performance.now() - streamStartTime) / 1000);
+                const lineRateMbps = (totalLoaded * 8) / 1_000_000 / elapsedSec;
+                latestMeasuredMbps = Math.max(1.0, lineRateMbps);
+
+                const pct = Math.min(100, Math.round((totalLoaded / file.size) * 100));
+                setActiveUploadProgress(pct);
+                setActiveUploadMbps(Number(latestMeasuredMbps.toFixed(1)));
+              };
+
+              const sendSingleChunk = (chunkMeta: {
+                index: number;
+                start: number;
+                end: number;
+              }): Promise<void> => {
+                return new Promise((resolve, reject) => {
+                  if (uploadCancelledRef.current) {
+                    reject(new Error('Upload cancelled'));
+                    return;
+                  }
+
+                  const blobSlice = file.slice(chunkMeta.start, chunkMeta.end);
+                  const xhr = new XMLHttpRequest();
+                  activeXhrsRef.current.add(xhr);
+
+                  xhr.open(
+                    'POST',
+                    `${origin}/api/rooms/${encodeURIComponent(roomId)}/files/${encodeURIComponent(fileId)}/chunk`,
+                    true
+                  );
+                  xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+                  xhr.setRequestHeader('X-Chunk-Offset', String(chunkMeta.start));
+                  xhr.setRequestHeader(
+                    'X-Transfer-Speed',
+                    String(latestMeasuredMbps.toFixed(1))
+                  );
+
+                  xhr.upload.onprogress = (ev) => {
+                    if (ev.lengthComputable) {
+                      chunkLoadedBytes[chunkMeta.index] = ev.loaded;
+                      updateLiveTelemetry();
+                    }
+                  };
+
+                  xhr.onload = () => {
+                    activeXhrsRef.current.delete(xhr);
+                    if (xhr.status >= 200 && xhr.status < 300) {
+                      chunkLoadedBytes[chunkMeta.index] = chunkMeta.end - chunkMeta.start;
+                      updateLiveTelemetry();
+                      resolve();
+                    } else {
+                      reject(new Error(`Chunk transfer failed (HTTP ${xhr.status})`));
+                    }
+                  };
+
+                  xhr.onerror = () => {
+                    activeXhrsRef.current.delete(xhr);
+                    reject(new Error('Network error during high-speed stream.'));
+                  };
+
+                  xhr.onabort = () => {
+                    activeXhrsRef.current.delete(xhr);
+                    reject(new Error('Upload cancelled'));
+                  };
+
+                  xhr.send(blobSlice);
+                });
+              };
+
+              let queueIndex = 0;
+              const workerCount = Math.min(PARALLEL_STREAMS, chunks.length);
+              const workers = Array.from({ length: workerCount }, async () => {
+                while (queueIndex < chunks.length) {
+                  if (uploadCancelledRef.current) break;
+                  const currentChunk = chunks[queueIndex++];
+                  await sendSingleChunk(currentChunk);
+                }
+              });
+
+              await Promise.all(workers);
+
+              const totalElapsedSec = Math.max(0.01, (performance.now() - streamStartTime) / 1000);
+              const finalMbps = Math.max(1.0, (file.size * 8) / 1_000_000 / totalElapsedSec);
+
+              await fetch(
+                `${origin}/api/rooms/${encodeURIComponent(roomId)}/files/${encodeURIComponent(fileId)}/complete`,
+                {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ speedMbps: Number(finalMbps.toFixed(1)) }),
+                }
+              );
+              uploadedToServer = true;
+            }
+          }
+        } catch (err: unknown) {
+          if (createdFileId && origin !== null) {
+            fetch(
+              `${origin}/api/rooms/${encodeURIComponent(roomId)}/files/${encodeURIComponent(createdFileId)}`,
+              {
+                method: 'DELETE',
+                headers: { 'X-Room-Pin': roomPin },
+              }
+            ).catch(() => {});
+          }
+          const msg = err instanceof Error ? err.message : '';
+          if (msg === 'Upload cancelled') {
+            break;
+          }
+        }
+      }
+
+      // 2. Always Store in P2P WebRTC + IndexedDB Room Engine (Primary on Vercel, Instant Peer Sync)
+      if (p2pSessionRef.current && !uploadCancelledRef.current) {
+        try {
+          await p2pSessionRef.current.addLocalFileWithProgress(
+            file,
+            senderLabel,
+            deviceInfo.deviceType,
             transferMode,
             retentionHours,
-          }),
-        });
-
-        if (!initRes.ok) {
-          const errData = await initRes.json().catch(() => ({}));
-          throw new Error(errData.error || 'Failed to initialize transfer.');
-        }
-
-        const { file: createdFile } = await initRes.json();
-        const fileId: string = createdFile.id;
-        createdFileId = fileId;
-
-        if (file.size === 0) {
-          await fetch(
-            `/api/rooms/${encodeURIComponent(roomId)}/files/${encodeURIComponent(fileId)}/complete`,
-            {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ speedMbps: 100 }),
-            }
+            (pct, mbps) => {
+              if (!uploadedToServer) {
+                setActiveUploadProgress(pct);
+                setActiveUploadMbps(mbps);
+              }
+            },
+            () => uploadCancelledRef.current
           );
-          continue;
-        }
-
-        const streamStartTime = performance.now();
-        const dynamicChunkSize = getOptimalChunkSize(file.size);
-
-        const chunks: { index: number; start: number; end: number }[] = [];
-        let cursor = 0;
-        let idx = 0;
-        while (cursor < file.size) {
-          const end = Math.min(file.size, cursor + dynamicChunkSize);
-          chunks.push({ index: idx++, start: cursor, end });
-          cursor = end;
-        }
-
-        const chunkLoadedBytes = new Array<number>(chunks.length).fill(0);
-        let latestMeasuredMbps = 40.0;
-
-        const updateLiveTelemetry = () => {
-          const totalLoaded = chunkLoadedBytes.reduce((a, b) => a + b, 0);
-          const elapsedSec = Math.max(0.015, (performance.now() - streamStartTime) / 1000);
-          const lineRateMbps = (totalLoaded * 8) / 1_000_000 / elapsedSec;
-          latestMeasuredMbps = Math.max(1.0, lineRateMbps);
-
-          const pct = Math.min(100, Math.round((totalLoaded / file.size) * 100));
-          setActiveUploadProgress(pct);
-          setActiveUploadMbps(Number(latestMeasuredMbps.toFixed(1)));
-        };
-
-        const sendSingleChunk = (chunkMeta: {
-          index: number;
-          start: number;
-          end: number;
-        }): Promise<void> => {
-          return new Promise((resolve, reject) => {
-            if (uploadCancelledRef.current) {
-              reject(new Error('Upload cancelled'));
-              return;
-            }
-
-            const blobSlice = file.slice(chunkMeta.start, chunkMeta.end);
-            const xhr = new XMLHttpRequest();
-            activeXhrsRef.current.add(xhr);
-
-            xhr.open(
-              'POST',
-              `/api/rooms/${encodeURIComponent(roomId)}/files/${encodeURIComponent(fileId)}/chunk`,
-              true
-            );
-            xhr.setRequestHeader('Content-Type', 'application/octet-stream');
-            xhr.setRequestHeader('X-Chunk-Offset', String(chunkMeta.start));
-            xhr.setRequestHeader(
-              'X-Transfer-Speed',
-              String(latestMeasuredMbps.toFixed(1))
-            );
-
-            xhr.upload.onprogress = (ev) => {
-              if (ev.lengthComputable) {
-                chunkLoadedBytes[chunkMeta.index] = ev.loaded;
-                updateLiveTelemetry();
-              }
-            };
-
-            xhr.onload = () => {
-              activeXhrsRef.current.delete(xhr);
-              if (xhr.status >= 200 && xhr.status < 300) {
-                chunkLoadedBytes[chunkMeta.index] = chunkMeta.end - chunkMeta.start;
-                updateLiveTelemetry();
-                resolve();
-              } else {
-                reject(new Error(`Chunk transfer failed (HTTP ${xhr.status})`));
-              }
-            };
-
-            xhr.onerror = () => {
-              activeXhrsRef.current.delete(xhr);
-              reject(new Error('Network error during high-speed stream.'));
-            };
-
-            xhr.onabort = () => {
-              activeXhrsRef.current.delete(xhr);
-              reject(new Error('Upload cancelled'));
-            };
-
-            xhr.send(blobSlice);
-          });
-        };
-
-        let queueIndex = 0;
-        const workerCount = Math.min(PARALLEL_STREAMS, chunks.length);
-        const workers = Array.from({ length: workerCount }, async () => {
-          while (queueIndex < chunks.length) {
-            if (uploadCancelledRef.current) break;
-            const currentChunk = chunks[queueIndex++];
-            await sendSingleChunk(currentChunk);
+        } catch (err: unknown) {
+          const message = err instanceof Error ? err.message : 'Transfer failed.';
+          if (message !== 'Upload cancelled' && !uploadedToServer) {
+            setUploadError(message);
           }
-        });
-
-        await Promise.all(workers);
-
-        const totalElapsedSec = Math.max(0.01, (performance.now() - streamStartTime) / 1000);
-        const finalMbps = Math.max(1.0, (file.size * 8) / 1_000_000 / totalElapsedSec);
-
-        await fetch(
-          `/api/rooms/${encodeURIComponent(roomId)}/files/${encodeURIComponent(fileId)}/complete`,
-          {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ speedMbps: Number(finalMbps.toFixed(1)) }),
-          }
-        );
-      } catch (err: unknown) {
-        if (createdFileId) {
-          fetch(
-            `/api/rooms/${encodeURIComponent(roomId)}/files/${encodeURIComponent(createdFileId)}`,
-            {
-              method: 'DELETE',
-              headers: { 'X-Room-Pin': roomPin },
-            }
-          ).catch(() => {});
-        }
-        const message = err instanceof Error ? err.message : 'Transfer failed.';
-        if (message !== 'Upload cancelled') {
-          setUploadError(message);
         }
       }
     }
@@ -742,30 +945,44 @@ export default function App() {
   };
 
   const handleDeleteFile = async (fileId: string) => {
-    try {
-      await fetch(
-        `/api/rooms/${encodeURIComponent(roomId)}/files/${encodeURIComponent(fileId)}`,
-        {
-          method: 'DELETE',
-          headers: { 'X-Room-Pin': roomPin },
-        }
-      );
-      setFiles((prev) => prev.filter((f) => f.id !== fileId));
-    } catch (err) {
-      console.error('Delete error:', err);
+    if (p2pSessionRef.current) {
+      await p2pSessionRef.current.deleteFile(fileId);
+    }
+    setServerFiles((prev) => prev.filter((f) => f.id !== fileId));
+
+    const origin = backendOriginRef.current;
+    if (origin !== null) {
+      try {
+        await fetch(
+          `${origin}/api/rooms/${encodeURIComponent(roomId)}/files/${encodeURIComponent(fileId)}`,
+          {
+            method: 'DELETE',
+            headers: { 'X-Room-Pin': roomPin },
+          }
+        );
+      } catch {
+        // ignore
+      }
     }
   };
 
   const handleClearRoom = async () => {
-    try {
-      await fetch(`/api/rooms/${encodeURIComponent(roomId)}/clear`, {
-        method: 'DELETE',
-        headers: { 'X-Room-Pin': roomPin },
-      });
-      setFiles([]);
-      setUsedBytes(0);
-    } catch (err) {
-      console.error('Clear error:', err);
+    if (p2pSessionRef.current) {
+      await p2pSessionRef.current.clearRoom();
+    }
+    setServerFiles([]);
+    setP2pFiles([]);
+
+    const origin = backendOriginRef.current;
+    if (origin !== null) {
+      try {
+        await fetch(`${origin}/api/rooms/${encodeURIComponent(roomId)}/clear`, {
+          method: 'DELETE',
+          headers: { 'X-Room-Pin': roomPin },
+        });
+      } catch {
+        // ignore
+      }
     }
   };
 
