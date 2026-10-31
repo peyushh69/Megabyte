@@ -1,0 +1,8 @@
+{
+  "name": "SwiftBeam — 10GB Cross-Device File Sharing",
+  "description": "High-speed PC-to-Mobile and Mobile-to-PC file sharing workspace supporting up to 10GB capacity over Wi-Fi Direct, Instant Room Vault, and Bluetooth.",
+  "requestFramePermissions": [
+    "bluetooth"
+  ],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

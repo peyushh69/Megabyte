@@ -1,0 +1,41 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    --font-brand: 'Unbounded', 'Arial Black', sans-serif;
+    --font-display: 'Share Tech Mono', 'Space Mono', 'JetBrains Mono', monospace;
+    --font-sans: 'Share Tech Mono', 'JetBrains Mono', monospace;
+    --font-mono: 'JetBrains Mono', 'Share Tech Mono', monospace;
+  }
+
+  body {
+    font-family: var(--font-sans);
+    background-color: #eae8e3;
+    color: #111111;
+    margin: 0;
+    padding: 0;
+    font-variant-numeric: tabular-nums slashed-zero;
+    font-feature-settings: "zero" 1;
+    letter-spacing: 0.03em;
+  }
+
+  .font-brand {
+    font-family: var(--font-brand);
+    font-weight: 900;
+    letter-spacing: -0.055em;
+    line-height: 0.92;
+  }
+
+  h1, h2, h3, h4, .font-display {
+    font-family: var(--font-display);
+    font-variant-numeric: tabular-nums slashed-zero;
+    font-feature-settings: "zero" 1;
+    letter-spacing: 0.04em;
+  }
+
+  .font-mono, .tabular-nums {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums slashed-zero;
+    font-feature-settings: "zero" 1;
+  }
+}
