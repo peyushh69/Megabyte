@@ -16,6 +16,7 @@ import {
 } from 'lucide-react';
 import { SharedFileItem, ConnectedDevice, TransferMode } from './types';
 import { QrPairingModal } from './components/QrPairingModal';
+import { PdfToJpegConverter } from './components/PdfToJpegConverter';
 import { P2PRoomSession } from './services/p2pRoomEngine';
 
 const MAX_CAPACITY_BYTES = 10 * 1024 * 1024 * 1024; // 10 GB
@@ -1028,6 +1029,12 @@ export default function App() {
             >
               DEVICES ({devices.length})
             </a>
+            <a
+              href="#pdf-converter"
+              className="hover:text-[#111111] transition-colors whitespace-nowrap shrink-0"
+            >
+              PDF TO JPEG
+            </a>
           </nav>
 
           <button
@@ -1510,6 +1517,8 @@ export default function App() {
                 })}
               </div>
             </section>
+            {/* PDF to JPEG High-Resolution Converter */}
+            <PdfToJpegConverter />
           </>
         )}
       </main>
